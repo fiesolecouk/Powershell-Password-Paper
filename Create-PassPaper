@@ -1,0 +1,245 @@
+<#
+    Script Title: One-Time Password Generator with Local HTML Viewer
+    Description: 
+        This script is designed for IT support professionals to generate a one-time password (secret)
+        and create a local HTML file that displays the secret to a customer. The secret (a combination
+        of a color, a UK town/city, and an animal) is generated, encrypted, and stored with an expiration 
+        time. The HTML file includes a "click-to-reveal" secret and a countdown timer (calculated dynamically)
+        that hides the secret after it expires.
+    Author: Your Name
+    Date: 2025-02-19
+    Version: 2.0
+    Notes:
+        - This version writes a local HTML file instead of hosting a web server.
+        - The HTML file is saved in the temporary folder and then launched in the default browser.
+#>
+
+param(
+    [switch]$Verbose,
+    [int]$CleanupInterval = 5000  # (Unused in this version but kept for future extensibility)
+)
+
+if ($Verbose) { $VerbosePreference = "Continue" }
+Write-Verbose "Script initialization started."
+
+# -------------------------------
+# Global Variables & Configuration
+$Secrets = [hashtable]::Synchronized(@{})  # Thread-safe storage for secrets.
+Write-Verbose "Secret storage initialized."
+
+# -------------------------------
+# Logging function.
+function Log-Activity {
+    param ([string]$Message)
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$Timestamp - $Message" | Out-File -Append -Encoding utf8 "$env:TEMP\secret_log.txt"
+    Write-Verbose "LOG: $Message"
+}
+
+# -------------------------------
+# Secret Generation Function
+function Generate-Secret {
+    Write-Verbose "Generating a new secret..."
+    $colours = @("red", "blue", "green", "yellow", "purple", "orange", "pink", "teal", "navy", "maroon", "cyan", "magenta", "lime", "olive", "violet", "indigo", "scarlet", "amber")
+    $ukCities = @("london", "manchester", "birmingham", "liverpool", "glasgow", "edinburgh", "bristol", "leeds", "sheffield", "newcastle", "oxford", "cambridge", "cardiff", "brighton", "coventry", "nottingham", "leicester", "southampton", "plymouth", "portsmouth", "bath", "exeter", "reading", "sunderland", "chester", "hull", "derby")
+    $animals = @("cat", "dog", "lion", "tiger", "bear", "wolf", "fox", "eagle", "rabbit", "horse", "cow", "sheep", "goat", "deer", "donkey", "monkey", "panda", "koala", "kangaroo", "otter", "badger", "ferret", "squirrel", "hamster", "llama", "zebra", "rooster", "dove")
+    
+    $colour = Get-Random -InputObject $colours
+    $city   = Get-Random -InputObject $ukCities
+    $animal = Get-Random -InputObject $animals
+    Write-Verbose "Generated secret parts: colour='$colour', city='$city', animal='$animal'"
+    return "$colour $city $animal"
+}
+
+# -------------------------------
+# AES Encryption/Decryption Functions
+function Encrypt-Secret($SecretText) {
+    Write-Verbose "Encrypting secret..."
+    try {
+        $Key = New-Object byte[] 16
+        [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($Key)
+        $IV = New-Object byte[] 16
+        [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($IV)
+        $Aes = [System.Security.Cryptography.Aes]::Create()
+        $Aes.Key = $Key
+        $Aes.IV = $IV
+        $Encryptor = $Aes.CreateEncryptor()
+        $SecretBytes = [System.Text.Encoding]::UTF8.GetBytes($SecretText)
+        $EncryptedSecret = $Encryptor.TransformFinalBlock($SecretBytes, 0, $SecretBytes.Length)
+        Write-Verbose "Secret successfully encrypted."
+        return @{ "Secret" = $EncryptedSecret; "Key" = $Key; "IV" = $IV }
+    } catch {
+        Log-Activity "Encryption failed: $_"
+        throw $_
+    }
+}
+
+function Decrypt-Secret($EncryptedSecret, $Key, $IV) {
+    Write-Verbose "Decrypting secret..."
+    try {
+        $Aes = [System.Security.Cryptography.Aes]::Create()
+        $Aes.Key = $Key
+        $Aes.IV = $IV
+        $Decryptor = $Aes.CreateDecryptor()
+        $DecryptedBytes = $Decryptor.TransformFinalBlock($EncryptedSecret, 0, $EncryptedSecret.Length)
+        Write-Verbose "Secret successfully decrypted."
+        return [System.Text.Encoding]::UTF8.GetString($DecryptedBytes)
+    } catch {
+        Log-Activity "Decryption failed: $_"
+        throw $_
+    }
+}
+
+# -------------------------------
+# Function to Add a New Secret
+function Add-Secret {
+    Write-Verbose "Entering Add-Secret function..."
+    $SecretText = Generate-Secret
+    Write-Host "Generated secret: $SecretText"
+
+    # Validate expiration time input.
+    $validExpiry = $false
+    while (-not $validExpiry) {
+        $ExpiryTimeInput = Read-Host "Enter expiration time in seconds (positive integer)"
+        if ([int]::TryParse($ExpiryTimeInput, [ref]0) -and [int]$ExpiryTimeInput -gt 0) {
+            $ExpiryTime = [int]$ExpiryTimeInput
+            $validExpiry = $true
+        } else {
+            Write-Host "Invalid input. Please enter a positive integer for expiration time."
+        }
+    }
+    Write-Verbose "User input for expiration: $ExpiryTime seconds"
+
+    # Generate a unique 8-character identifier.
+    $Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    do {
+        $ShortID = -join (1..8 | ForEach-Object { $Chars[(Get-Random -Minimum 0 -Maximum $Chars.Length)] })
+    } while ($Secrets.ContainsKey($ShortID))
+    Write-Verbose "Generated unique short ID: $ShortID"
+
+    $EncryptedData = Encrypt-Secret $SecretText
+    $Expiry = (Get-Date).AddSeconds($ExpiryTime)
+    Write-Verbose "Secret will expire at $Expiry"
+
+    $Secrets[$ShortID] = @{
+        "Encrypted" = $EncryptedData["Secret"];
+        "Key"       = $EncryptedData["Key"];
+        "IV"        = $EncryptedData["IV"];
+        "Expiry"    = $Expiry
+    }
+    Write-Host "Secret stored with ID: $ShortID"
+    Log-Activity "Secret stored with ID: $ShortID, Expires at: $Expiry"
+}
+
+# -------------------------------
+# Let the user add one or more secrets.
+do {
+    Add-Secret
+    $MoreSecrets = Read-Host "Do you want to add another secret? (y/n)"
+} while ($MoreSecrets -eq "y")
+Write-Verbose "Secret generation phase completed."
+
+# -------------------------------
+# Function to Generate and Open Local HTML File for a Secret
+function Show-SecretLocal {
+    param(
+        [string]$ID,
+        [hashtable]$SecretData
+    )
+    try {
+        $secretText = Decrypt-Secret $SecretData["Encrypted"] $SecretData["Key"] $SecretData["IV"]
+    } catch {
+        $secretText = "Error decrypting secret."
+    }
+    # Convert the expiry time to an ISO 8601 string (UTC) for dynamic countdown.
+    $expiryTimeIso = $SecretData["Expiry"].ToUniversalTime().ToString("o")
+    
+    # Generate the HTML content with embedded JavaScript.
+    $html = @"
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Secret Page - ID $ID</title>
+    <style>
+      html, body {
+         height: 100%;
+         margin: 0;
+         display: flex;
+         justify-content: center;
+         align-items: center;
+         background-color: #222;
+         color: white;
+         font-family: Arial, sans-serif;
+         text-align: center;
+      }
+      .container {
+         width: 80%;
+         max-width: 600px;
+         padding: 20px;
+         background: rgba(255, 255, 255, 0.1);
+         border-radius: 10px;
+         box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+      }
+      .secret {
+         font-size: 24px;
+         font-weight: bold;
+         color: transparent;
+         background-color: #d9534f;
+         padding: 15px;
+         border-radius: 5px;
+         cursor: pointer;
+         transition: background 0.3s, color 0.3s;
+      }
+      .secret:hover {
+         background-color: #b52b27;
+      }
+    </style>
+    <script>
+      // Set expiry time from the embedded ISO string.
+      const expiryTime = new Date("$expiryTimeIso");
+      function updateCountdown() {
+         const now = new Date();
+         let timeLeft = Math.round((expiryTime - now) / 1000);
+         if (timeLeft > 0) {
+            document.getElementById('countdown').innerText = 'Expires in ' + timeLeft + ' seconds';
+            setTimeout(updateCountdown, 1000);
+         } else {
+            document.body.innerHTML = '<h2>Secret Expired</h2>';
+         }
+      }
+      function revealSecret() {
+         let secretEl = document.getElementById('secret');
+         secretEl.innerText = secretEl.getAttribute('data-secret');
+         secretEl.style.color = 'white';
+         secretEl.style.backgroundColor = 'transparent';
+         secretEl.style.cursor = 'default';
+      }
+      window.onload = updateCountdown;
+    </script>
+</head>
+<body>
+   <div class="container">
+      <h2>Your Secret</h2>
+      <p id="secret" class="secret" data-secret="$secretText" onclick="revealSecret()">Click to reveal</p>
+      <p id="countdown">Loading...</p>
+   </div>
+</body>
+</html>
+"@
+    # Write the HTML to a file in the TEMP folder.
+    $filePath = "$env:TEMP\secret_$ID.html"
+    $html | Out-File -Encoding UTF8 $filePath
+    Write-Host "Local secret file generated: $filePath"
+    Log-Activity "Local secret file generated for ID: $ID at $filePath"
+    
+    # Launch the HTML file in the default web browser.
+#    Start-Process $filePath
+}
+
+# -------------------------------
+# Generate and open a local HTML file for each secret.
+#foreach ($key in $Secrets.Keys) {
+#    Show-SecretLocal -ID $key -SecretData $Secrets[$key]
+#}
